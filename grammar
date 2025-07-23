@@ -1,0 +1,37 @@
+# This is largely informal and things like handling escapes / most whitespace is ignored
+
+file := properties? paragraph ('\n\n' paragraph)* ;
+
+properties := '---\n' property ('\n' property)* '\n---' ;
+
+property := text_property | list_property ;
+
+text_property := (/ basically `string`, just every non-illegal character /) ;
+
+list_property := ('- ' fragment '\n') ;
+
+paragraph := heading? fragment* ;
+fragment := link | list_block | formatted_text | quote_block | codeblock | string ;
+
+link := '[[' string ']]' # Wikilink / internal link
+	| '[' string ']' '(' string ')' # External link ;
+
+heading := '#'{1,6} ' ' string '\n' ;
+
+# I might rework this to replace string with fragment*
+formatted_text := '**' string '**' # Bold
+	| '*' string '*' # Italics
+	| '~~' string '~~' # Strikethrough
+	| '`' string '`' ;
+
+quote_block := ('> ' fragment* '\n')+ ;
+
+list_block := ('- ' fragment* '\n')+ ;
+
+code_block := '```\n' (word '\n')? code '\n```' ;
+
+code := (/ anything other than '\n```' /) ;
+
+word := (* anything other than whitespace or one of the characters that can start an inline format *) ;
+
+string := (word non_newline_whitespace)* ;
