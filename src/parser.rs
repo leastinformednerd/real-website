@@ -1,11 +1,13 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while, take_while1};
-use nom::character::complete::{multispace0, space0};
-use nom::combinator::opt;
+use nom::character::complete::{multispace0, space0, space1, u8};
+use nom::combinator::{opt, verify};
 use nom::error::Error;
 use nom::multi::{many_m_n, many1, separated_list0, separated_list1};
 use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::{AsChar, IResult, Parser};
+
+use std::cell::Cell;
 
 pub type Properties<'a> = Vec<Property<'a>>;
 
@@ -43,7 +45,8 @@ pub struct Heading<'a> {
 #[derive(Debug)]
 enum Fragment<'a> {
     Link(Link<'a>),
-    ListBlock(Vec<Vec<Fragment<'a>>>),
+    UnorderedListBlock(Vec<Vec<Fragment<'a>>>),
+    OrderedListBlock(Vec<Vec<Fragment<'a>>>),
     FormattedText {
         kind: FormattedTextKind,
         body: &'a str,
@@ -71,6 +74,21 @@ enum FormattedTextKind {
     InlineCode,
 }
 
+macro_rules! not_in {
+    ($($args:literal),*) => {
+        |c: char| {!(not_in_inner!(c, $($args),*) || c.is_newline())}
+    }
+}
+
+macro_rules! not_in_inner {
+    ($c:ident, $arg:literal, $($args:literal),+) => {
+        $c == $arg || not_in_inner!($c, $($args),*)
+    };
+    ($c:ident, $arg:literal) => {
+        $c == $arg
+    };
+}
+
 pub fn parse_file<'a>(file: &'a str) -> Result<File<'a>, nom::Err<Error<&'a str>>> {
     let (file, properties) = opt(parse_properties).parse(file)?;
     let (_, paragraphs) = terminated(
@@ -88,8 +106,8 @@ pub fn parse_file<'a>(file: &'a str) -> Result<File<'a>, nom::Err<Error<&'a str>
 fn parse_properties<'a>(file: &'a str) -> IResult<&'a str, Properties<'a>> {
     let (file, res) = delimited(
         tag("---\n"),
-        separated_list1(tag("\n"), parse_property),
-        tag("\n---"),
+        separated_list0(tag("\n"), parse_property),
+        (multispace0, tag("---")),
     )
     .parse(file)?;
 
@@ -106,8 +124,11 @@ fn parse_property<'a>(file: &'a str) -> IResult<&'a str, Property<'a>> {
     )
     .parse(file)?;
 
-    let (file, kind) =
-        alt((parse_property_list, parse_string.map(PropertyKind::String))).parse(file)?;
+    let (file, kind) = alt((
+        parse_property_list,
+        take_while(not_in!('[', ']')).map(PropertyKind::String),
+    ))
+    .parse(file)?;
 
     Ok((file, Property { name, kind }))
 }
@@ -118,7 +139,7 @@ fn parse_property_list<'a>(file: &'a str) -> IResult<&'a str, PropertyKind<'a>> 
         separated_list1(
             tag("\n"),
             preceded(
-                (space0, tag("-"), space0),
+                (space0, tag("-"), space1),
                 alt((
                     delimited(
                         tag("\"[["),
@@ -128,10 +149,8 @@ fn parse_property_list<'a>(file: &'a str) -> IResult<&'a str, PropertyKind<'a>> 
                         tag("]]\""),
                     )
                     .map(|s| Fragment::Link(Link::Wiki { to: s, text: s })),
-                    take_while1(|c: char| {
-                        !(c == ':' || c == '[' || c == ']' || c == '-' || c.is_newline())
-                    })
-                    .map(Fragment::PlainStr),
+                    take_while1(|c: char| !(c == ':' || c == '[' || c == ']' || c.is_newline()))
+                        .map(Fragment::PlainStr),
                 )),
             ),
         ),
@@ -142,8 +161,11 @@ fn parse_property_list<'a>(file: &'a str) -> IResult<&'a str, PropertyKind<'a>> 
 
 fn parse_paragraph<'a>(file: &'a str) -> IResult<&'a str, Paragraph<'a>> {
     let (file, heading) = opt(parse_heading).parse(file)?;
-    let (file, body) =
-        preceded(multispace0, separated_list0(space0, parse_fragment)).parse(file)?;
+    let (file, body) = preceded(
+        multispace0,
+        separated_list0((space0, opt(tag("\n"))), parse_fragment),
+    )
+    .parse(file)?;
 
     Ok((file, Paragraph { heading, body }))
 }
@@ -151,7 +173,8 @@ fn parse_paragraph<'a>(file: &'a str) -> IResult<&'a str, Paragraph<'a>> {
 fn parse_fragment<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
     alt((
         parse_link,
-        parse_list_block,
+        parse_unordered_list_block,
+        parse_ordered_list_block,
         parse_formatted_text,
         parse_quote_block,
         parse_code_block,
@@ -171,7 +194,8 @@ fn parse_heading<'a>(file: &'a str) -> IResult<&'a str, Heading<'a>> {
 
 fn parse_link<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
     fn parse_wikilink<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
-        let (file, inner) = delimited(tag("[["), parse_string, tag("]]")).parse(file)?;
+        let (file, inner) =
+            delimited(tag("[["), take_while1(not_in!(']', '[', '|')), tag("]]")).parse(file)?;
 
         Ok((
             file,
@@ -185,7 +209,11 @@ fn parse_link<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
     fn parse_alias_wikilink<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
         let (file, (to, alias)) = delimited(
             tag("[["),
-            separated_pair(parse_string, tag("|"), parse_string),
+            separated_pair(
+                take_while1(not_in!(']', '[', '|')),
+                tag("|"),
+                take_while1(not_in!(']', '[', '|')),
+            ),
             tag("]]"),
         )
         .parse(file)?;
@@ -194,8 +222,10 @@ fn parse_link<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
     }
 
     fn parse_ext_link<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
-        let (file, txt) = delimited(tag("["), parse_string, tag("]")).parse(file)?;
-        let (file, link) = delimited(tag("("), parse_string, tag(")")).parse(file)?;
+        let (file, txt) =
+            delimited(tag("["), take_while1(not_in!(']', '[')), tag("]")).parse(file)?;
+        let (file, link) =
+            delimited(tag("("), take_while1(not_in!('(', ')')), tag(")")).parse(file)?;
 
         Ok((file, Fragment::Link(Link::External(txt, link))))
     }
@@ -203,14 +233,37 @@ fn parse_link<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
     alt((parse_alias_wikilink, parse_wikilink, parse_ext_link)).parse(file)
 }
 
-fn parse_list_block<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
+fn parse_unordered_list_block<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
     let (file, inner) = many1(preceded(
         (tag("\n"), multispace0, tag("-"), multispace0),
         separated_list0(multispace0, parse_fragment),
     ))
     .parse(file)?;
 
-    Ok((file, Fragment::ListBlock(inner)))
+    Ok((file, Fragment::UnorderedListBlock(inner)))
+}
+
+fn parse_ordered_list_block<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {
+    let cur = Cell::new(0u8);
+    let verifier = |n: &u8| {
+        let cur_v = cur.get();
+        if cur_v < 2 && *n < 2 {
+            cur.set(*n);
+            true
+        } else if *n == cur_v + 1 {
+            cur.set(*n);
+            true
+        } else {
+            false
+        }
+    };
+    let (file, inner) = many1(preceded(
+        (multispace0, verify(u8, verifier), tag("."), space0),
+        separated_list0(space0, parse_fragment),
+    ))
+    .parse(file)?;
+
+    Ok((file, Fragment::OrderedListBlock(inner)))
 }
 
 fn parse_formatted_text<'a>(file: &'a str) -> IResult<&'a str, Fragment<'a>> {

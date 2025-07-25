@@ -1,13 +1,14 @@
+use traversal::traverse;
+
 mod parser;
+mod traversal;
 
 fn main() {
-    let s = std::fs::read_to_string(
-        "/home/leastinformednerd/Documents/Opinions/Art/Music/Songs/viceheart.md",
-    )
-    .expect("debug");
-    let res = parser::parse_file(&s);
+    let res = traverse("/home/leastinformednerd/Documents/Opinions".into());
     match res {
-        Ok(parse) => println!("{parse:#?}"),
+        Ok(parse) => {
+            println!("{parse:#?}")
+        }
         Err(err) => println!("err: {err:#?}"),
     }
 }
